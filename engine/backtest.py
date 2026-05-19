@@ -30,21 +30,19 @@ def _sell(pf, code, price, config, trades, date, reason):
                    "reason": reason})
 
 
-def _rebalance(pf, weights, opens, config, trades, date):
-    # 기존 포지션의 entry_price 보존 (동일 종목 리밸런싱 시 익절 기준 유지)
-    old_entries = {code: pos.entry_price for code, pos in pf.positions.items()}
+def _rebalance(pf, weights, opens, config, trades, date,
+               absolute_filtered=None):
     for code in list(pf.positions):
-        _sell(pf, code, opens.get(code, np.nan), config, trades, date,
-              "rebalance")
+        reason = ("absolute_momentum"
+                  if absolute_filtered and code in absolute_filtered
+                  else "rebalance")
+        _sell(pf, code, opens.get(code, np.nan), config, trades, date, reason)
     investable = pf.cash
     for code, w in weights.items():
         px = opens.get(code, np.nan)
         if np.isfinite(px) and px > 0:
             _buy(pf, code, px, investable * w, config, trades, date,
                  "rebalance")
-            # 동일 종목 재진입 시 원래 entry_price 복원
-            if code in old_entries and code in pf.positions:
-                pf.positions[code].entry_price = old_entries[code]
 
 
 def _first_trading_day_of_month(dates) -> pd.Series:
@@ -64,7 +62,7 @@ def run_backtest(close_panel, open_panel, config):
     """
     dates = close_panel.index
     pf = Portfolio(cash=config.initial_capital)
-    pending = None  # None | ("rebalance", weights) | ("sell", [codes])
+    pending = None  # None | ("rebalance", weights, abs_filtered) | ("sell", [codes])
     trades = []
     equity = {}
     is_rebal = _first_trading_day_of_month(dates)
@@ -81,7 +79,8 @@ def run_backtest(close_panel, open_panel, config):
                     _sell(pf, code, opens.get(code, np.nan), config,
                           trades, d, "take_profit")
             elif kind == "rebalance":
-                _rebalance(pf, pending[1], opens, config, trades, d)
+                _rebalance(pf, pending[1], opens, config, trades, d,
+                           absolute_filtered=pending[2])
             pending = None
 
         # 2) 종가 기준 평가금액 기록
@@ -107,7 +106,8 @@ def run_backtest(close_panel, open_panel, config):
             weights = target_weights(selected, scores, config.top_k,
                                      config.use_absolute_momentum,
                                      config.absolute_momentum_threshold)
-            pending = ("rebalance", weights)
+            absolute_filtered = set(selected) - set(weights.keys())
+            pending = ("rebalance", weights, absolute_filtered)
 
     return pd.Series(equity).sort_index(), trades
 

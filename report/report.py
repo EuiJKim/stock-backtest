@@ -5,6 +5,8 @@ matplotlib.use("Agg")  # 헤드리스 백엔드
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from metrics.performance import yearly_returns
+
 _ROWS = [
     ("total_return", "Total Return", "pct"),
     ("cagr", "CAGR", "pct"),
@@ -32,6 +34,15 @@ def format_summary_table(summary: dict) -> str:
     return "\n".join(lines)
 
 
+def format_yearly_table(equity: pd.Series) -> str:
+    yr = yearly_returns(equity)
+    lines = ["=" * 28, f"{'Year':<10}{'Return':>18}", "-" * 28]
+    for year, ret in yr.items():
+        lines.append(f"{year:<10}{ret * 100:>17.2f}%")
+    lines.append("=" * 28)
+    return "\n".join(lines)
+
+
 def write_report(strategy_curve, benchmark_curve, trades, summary,
                   out_dir: str) -> str:
     os.makedirs(out_dir, exist_ok=True)
@@ -54,12 +65,14 @@ def write_report(strategy_curve, benchmark_curve, trades, summary,
                                 index=False, encoding="utf-8-sig")
 
     table = format_summary_table(summary)
+    yearly_table = format_yearly_table(strategy_curve)
     html = (f"<html><head><meta charset='utf-8'></head><body>"
             f"<h1>Backtest Summary</h1><pre>{table}</pre>"
+            f"<h2>연도별 수익률</h2><pre>{yearly_table}</pre>"
             f"<img src='equity_curve.png' style='max-width:900px'>"
             f"</body></html>")
     with open(os.path.join(out_dir, "summary.html"), "w",
               encoding="utf-8") as f:
         f.write(html)
 
-    return table
+    return table + "\n\n" + yearly_table

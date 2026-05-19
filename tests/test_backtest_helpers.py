@@ -53,3 +53,18 @@ def test_rebalance_resets_to_target_weights_at_open():
     assert "OLD" not in pf.positions
     assert round(pf.positions["A"].shares, 6) == round((100_000 / 3) / 500.0, 6)
     assert round(pf.positions["B"].shares, 6) == round((100_000 / 3) / 250.0, 6)
+
+
+def test_rebalance_entry_price_uses_rebalance_fill_not_stale():
+    """Fix 1 regression: entry_price must equal the rebalance fill (open) price,
+    not the stale pre-rebalance entry_price."""
+    cfg = _cfg()
+    pf = Portfolio(cash=0.0)
+    # Hold A with a stale entry_price of 1000
+    pf.positions["A"] = Position(shares=100.0, entry_price=1000.0)
+    opens = pd.Series({"A": 2000.0})
+    trades = []
+    _rebalance(pf, {"A": 1.0}, opens, cfg, trades, pd.Timestamp("2020-03-02"))
+    # After rebalance, A's entry_price must be 2000 (the rebalance open price),
+    # not the stale 1000.
+    assert pf.positions["A"].entry_price == 2000.0

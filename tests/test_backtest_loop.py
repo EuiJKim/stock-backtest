@@ -16,7 +16,7 @@ def _panels():
     idx = pd.date_range("2020-01-01", "2021-06-30", freq="B")
     n = len(idx)
     close = pd.DataFrame({
-        "A": 100.0 * (1.0 + 0.0015) ** np.arange(n),
+        "A": 100.0 * (1.0 + 0.005) ** np.arange(n),
         "B": np.full(n, 100.0),
         "C": 100.0 * (1.0 - 0.0010) ** np.arange(n),
     }, index=idx)
@@ -48,6 +48,37 @@ def test_take_profit_triggers_sell_with_reason():
                          commission_rate=0.0, slippage_rate=0.0)
     _, trades = run_backtest(close, opens, cfg)
     assert any(t["reason"] == "take_profit" for t in trades)
+
+
+def test_absolute_momentum_reason_labeled():
+    """Fix 5: A ticker held, top-K, but absolute-momentum-filtered should
+    produce a trade with reason == 'absolute_momentum'.
+
+    Setup: A falls mildly (score slightly < 0), B falls steeply (more negative).
+    So A is always top-K (less negative than B) but fails abs-momentum filter
+    (threshold=0). When A is held and the rebalance triggers, its sell must be
+    labelled 'absolute_momentum'.
+    """
+    idx = pd.date_range("2020-01-01", "2021-06-30", freq="B")
+    n = len(idx)
+    close = pd.DataFrame({
+        # A: rises first 6 months so it gets bought, then falls slowly
+        # (12-1 momentum goes negative but still > B's momentum)
+        "A": 100.0 * np.where(
+            np.arange(n) < n // 2,
+            (1.0 + 0.002) ** np.arange(n),
+            (1.0 + 0.002) ** (n // 2) * (1.0 - 0.002) ** (np.arange(n) - n // 2),
+        ),
+        # B: falls steeply throughout — always more negative momentum than A
+        "B": 100.0 * (1.0 - 0.008) ** np.arange(n),
+    }, index=idx)
+    cfg = BacktestConfig(top_k=1, use_take_profit=False,
+                         use_absolute_momentum=True,
+                         absolute_momentum_threshold=0.0,
+                         commission_rate=0.0, slippage_rate=0.0,
+                         initial_capital=1_000_000.0)
+    _, trades = run_backtest(close, close.copy(), cfg)
+    assert any(t["reason"] == "absolute_momentum" for t in trades)
 
 
 def test_absolute_momentum_goes_to_cash_when_all_negative():
