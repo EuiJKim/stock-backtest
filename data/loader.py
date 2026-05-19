@@ -13,6 +13,15 @@ def fdr_fetch(code: str, start: str, end: str) -> pd.DataFrame:
 
 
 def load_prices(code, start, end, cache_dir, fetch_fn=fdr_fetch) -> pd.DataFrame:
+    """Load OHLC price data for *code*, filtered to [start, end].
+
+    Cache behaviour
+    ---------------
+    The cache is keyed by *code* only (NOT by date range).  A cached CSV is
+    reused and date-filtered regardless of the originally fetched range.
+    Widening ``start``/``end`` after the first fetch will therefore return a
+    truncated slice — delete the cached file manually to re-fetch a wider window.
+    """
     path = _cache_path(cache_dir, code)
     if os.path.exists(path):
         df = pd.read_csv(path, index_col=0, parse_dates=True)
@@ -27,9 +36,16 @@ def load_prices(code, start, end, cache_dir, fetch_fn=fdr_fetch) -> pd.DataFrame
 def build_panels(codes, start, end, cache_dir, fetch_fn=fdr_fetch):
     closes, opens = {}, {}
     for code in codes:
-        df = load_prices(code, start, end, cache_dir, fetch_fn)
-        closes[code] = df["Close"]
-        opens[code] = df["Open"]
+        try:
+            df = load_prices(code, start, end, cache_dir, fetch_fn)
+            if df is None or len(df) == 0:
+                print(f"[warn] skip {code}: no data")
+                continue
+            closes[code] = df["Close"]
+            opens[code] = df["Open"]
+        except Exception as e:
+            print(f"[warn] skip {code}: {e}")
+            continue
     close_panel = pd.DataFrame(closes).sort_index()
     open_panel = pd.DataFrame(opens).reindex(close_panel.index)
     return close_panel, open_panel

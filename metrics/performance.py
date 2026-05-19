@@ -9,8 +9,7 @@ def total_return(equity: pd.Series) -> float:
 
 
 def cagr(equity: pd.Series) -> float:
-    d0, d1 = equity.index[0], equity.index[-1]
-    years = (d1.year - d0.year) + (d1.month - d0.month) / 12.0 + (d1.day - d0.day) / 365.0
+    years = (equity.index[-1] - equity.index[0]).days / 365.25
     if years <= 0:
         return 0.0
     return float((equity.iloc[-1] / equity.iloc[0]) ** (1.0 / years) - 1.0)

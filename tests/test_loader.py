@@ -34,3 +34,16 @@ def test_build_panels_aligns_close_and_open(tmp_path):
     assert list(close.columns) == ["AAA", "BBB"]
     assert close.index.equals(opens.index)
     assert close.loc[close.index[0], "AAA"] == 101.0
+
+
+def test_build_panels_skips_bad_code(tmp_path):
+    """A fetch that raises for 'BAD' must not abort the whole build; only 'AAA' survives."""
+    def _fetch_bad(code, start, end):
+        if code == "BAD":
+            raise RuntimeError("simulated fetch failure")
+        return _fake_fetch(code, start, end)
+
+    close, opens = build_panels(["AAA", "BAD"], "2020-01-01", "2020-01-31",
+                                cache_dir=str(tmp_path), fetch_fn=_fetch_bad)
+    assert list(close.columns) == ["AAA"]
+    assert "BAD" not in close.columns

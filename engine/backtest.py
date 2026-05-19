@@ -107,6 +107,7 @@ def run_backtest(close_panel, open_panel, config):
                                      config.use_absolute_momentum,
                                      config.absolute_momentum_threshold)
             absolute_filtered = set(selected) - set(weights.keys())
+            # rebalance supersedes any same-day take-profit signal (rebalance liquidates all positions anyway)
             pending = ("rebalance", weights, absolute_filtered)
 
     return pd.Series(equity).sort_index(), trades

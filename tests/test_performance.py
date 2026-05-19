@@ -4,6 +4,7 @@ from metrics.performance import (total_return, cagr, max_drawdown,
                                  sharpe, summarize)
 
 
+
 def test_total_return():
     s = pd.Series([100.0, 150.0])
     assert total_return(s) == 0.5
@@ -12,8 +13,16 @@ def test_total_return():
 def test_cagr_two_years_doubling():
     idx = pd.to_datetime(["2020-01-01", "2022-01-01"])
     s = pd.Series([100.0, 400.0], index=idx)
-    # 2년에 4배 → CAGR = 100%
-    assert round(cagr(s), 4) == 1.0
+    # 2년에 4배 → CAGR ≈ 100%  (actual/365.25 basis로 허용 오차 내)
+    assert round(cagr(s), 2) == 1.0
+
+
+def test_cagr_unaligned_endpoints():
+    idx = pd.to_datetime(["2020-02-29", "2023-01-05"])  # mismatched month/day
+    s = pd.Series([100.0, 400.0], index=idx)
+    days = (idx[-1] - idx[0]).days
+    expected = (400.0 / 100.0) ** (365.25 / days) - 1.0
+    assert abs(cagr(s) - expected) < 1e-9
 
 
 def test_max_drawdown():

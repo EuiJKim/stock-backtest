@@ -1,4 +1,3 @@
-import numpy as np
 import pandas as pd
 from config import BacktestConfig
 from engine.portfolio import Portfolio, Position

@@ -36,7 +36,7 @@ def _run_once(cfg, codes, name_by_code, out_dir):
     curve, trades = run_backtest(close, opens, cfg)
     bench_code = name_by_code.get(cfg.benchmark_name)
     bench = (benchmark_curve(close[bench_code], cfg.initial_capital)
-             if bench_code in close.columns else None)
+             if bench_code and bench_code in close.columns else None)
     summary = summarize(curve, trades)
     table = write_report(curve, bench, trades, summary, out_dir)
     print(table)
