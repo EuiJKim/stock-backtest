@@ -110,3 +110,11 @@ def run_backtest(close_panel, open_panel, config):
             pending = ("rebalance", weights)
 
     return pd.Series(equity).sort_index(), trades
+
+
+def benchmark_curve(close_series: pd.Series, initial_capital: float) -> pd.Series:
+    """벤치마크 ETF 매수후보유 가격수익률 곡선."""
+    s = close_series.dropna()
+    if s.empty:
+        return pd.Series(dtype=float)
+    return initial_capital * s / s.iloc[0]
