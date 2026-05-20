@@ -5,9 +5,10 @@ from pathlib import Path
 
 from broker.credentials import Credentials
 from broker.kiwoom import KiwoomClient
-from gui.app import TraderApp
+from gui.app import TraderApp, GuiLogHandler, _build_app_class
 from live.executor import execute
 from live.runner import decide
+from live.safety import is_market_open, holdings_drift_ok
 from live.scheduler import Scheduler
 from live.state import TraderState, TraderParams
 from live.universe_store import UniverseStore
@@ -35,11 +36,106 @@ def _parse_hhmm(s: str) -> dtime:
     return dtime(int(h), int(m))
 
 
+def run_trader_tick(broker, state, params, universe_codes, log,
+                    state_path, now=None, panels_loader=None):
+    """One scheduled tick.
+
+    1. Skip outside KRX hours (Fix 4).
+    2. Snapshot day-start equity on first trigger of each day (Fix 2).
+    3. Halt if broker holdings have drifted beyond tolerance (Fix 3).
+    4. Build panels, decide, execute.
+    5. Persist state.
+
+    Returns a string action label:
+      "market_closed" | "drift_halt" | "<Decision.action>"
+    """
+    now = now or datetime.now()
+    today_str = now.date().isoformat()
+
+    # Fix 4 — market hours guard
+    if not is_market_open(now):
+        log.info("outside KRX hours; skipping")
+        return "market_closed"
+
+    # Fix 2 — snapshot equity at start of day
+    if state.last_action_date != today_str or state.equity_start_of_day == 0.0:
+        try:
+            bal = broker.get_balance()
+            state.equity_start_of_day = bal.get("equity", 0.0)
+            log.info(f"day-start equity snapshotted: {state.equity_start_of_day:.0f}")
+        except Exception as e:
+            log.error(f"equity snapshot failed: {e}")
+            state.halted = True
+            state.save(state_path)
+            return "drift_halt"
+
+    # Fix 3 — drift guard
+    try:
+        broker_holdings = broker.get_holdings()
+    except Exception as e:
+        log.error(f"holdings fetch failed: {e}")
+        state.halted = True
+        state.save(state_path)
+        return "drift_halt"
+
+    if not holdings_drift_ok(state.holdings, broker_holdings,
+                              params.drift_tolerance):
+        log.warning(
+            "holdings drift exceeds tolerance — halting for manual review. "
+            f"state={state.holdings}, broker={broker_holdings}"
+        )
+        state.halted = True
+        state.save(state_path)
+        return "drift_halt"
+
+    # Build price panels
+    if panels_loader is None:
+        from data.loader import build_panels as _build_panels
+
+        def panels_loader(codes):  # noqa: E731
+            close, _ = _build_panels(codes,
+                                     "2024-01-01",
+                                     now.date().isoformat(),
+                                     "data/cache")
+            return close
+
+    try:
+        close = panels_loader(universe_codes)
+    except Exception as e:
+        log.exception(f"panels load failed: {e}")
+        state.halted = True
+        state.save(state_path)
+        return "drift_halt"
+
+    safety_params = {
+        "max_position_pct": params.max_position_pct,
+        "min_order_amount": params.min_order_amount,
+        "max_daily_loss": params.max_daily_loss,
+    }
+
+    try:
+        balance = broker.get_balance()
+        decision = decide(close, now.date(),
+                          state.holdings, balance.get("cash", 0.0),
+                          params, state)
+        ok = execute(decision, broker, state, safety_params, log, now=now)
+        state.save(state_path)
+        log.info(f"trigger 완료 ok={ok} action={decision.action} "
+                 f"reason={decision.reason}")
+        return decision.action
+    except Exception as e:
+        log.exception(f"trigger 실패: {e}")
+        state.halted = True
+        state.save(state_path)
+        return "error"
+
+
 def build_components(secrets_path=DEFAULT_SECRETS,
                      state_path=DEFAULT_STATE,
                      params_path=DEFAULT_PARAMS,
                      universe_path=DEFAULT_UNIVERSE,
-                     log=None) -> TraderComponents:
+                     log=None,
+                     app_master=None) -> TraderComponents:
     log = log or logging.getLogger("trader")
     creds = Credentials.load(secrets_path=secrets_path)
     state = TraderState.load(state_path)
@@ -51,33 +147,15 @@ def build_components(secrets_path=DEFAULT_SECRETS,
                           app_secret=creds.app_secret,
                           account_no=creds.account_no)
 
-    safety_params = {
-        "max_position_pct": params.max_position_pct,
-        "min_order_amount": params.min_order_amount,
-        "max_daily_loss": params.max_daily_loss,
-    }
-
     def on_trigger():
-        try:
-            from data.loader import build_panels
-            close, _ = build_panels(universe.codes(),
-                                     "2024-01-01",
-                                     datetime.now().date().isoformat(),
-                                     "data/cache")
-            balance = broker.get_balance()
-            holdings = broker.get_holdings()  # broker live; state 보유와 비교는 다음 단계 spec
-            decision = decide(close, datetime.now().date(),
-                               state.holdings, balance.get("cash", 0.0),
-                               params, state)
-            ok = execute(decision, broker, state, safety_params, log,
-                          now=datetime.now())
-            state.save(state_path)
-            log.info(f"trigger 완료 ok={ok} action={decision.action} "
-                     f"reason={decision.reason}")
-        except Exception as e:
-            log.exception(f"trigger 실패: {e}")
-            state.halted = True
-            state.save(state_path)
+        run_trader_tick(
+            broker=broker,
+            state=state,
+            params=params,
+            universe_codes=universe.codes(),
+            log=log,
+            state_path=state_path,
+        )
 
     scheduler = Scheduler(target_time=_parse_hhmm(params.target_time_hhmm),
                           on_trigger=on_trigger, tick_seconds=30)
@@ -94,8 +172,21 @@ def build_components(secrets_path=DEFAULT_SECRETS,
         log.info("자동매매 정지 (HALTED)")
         app.refresh_mode()
 
-    app = TraderApp(state=state, params=params, universe=universe,
-                     on_start=on_start, on_stop=on_stop)
+    if app_master is not None:
+        import tkinter as tk
+        _AppClass = _build_app_class(tk.Toplevel)
+        app = _AppClass(state=state, params=params, universe=universe,
+                        on_start=on_start, on_stop=on_stop,
+                        master=app_master)
+    else:
+        app = TraderApp(state=state, params=params, universe=universe,
+                        on_start=on_start, on_stop=on_stop)
+
+    # Fix 5 — wire GUI log panel to stdlib logger
+    gui_handler = GuiLogHandler(app)
+    gui_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    log.addHandler(gui_handler)
 
     return TraderComponents(credentials=creds, state=state, params=params,
                              universe=universe, broker=broker,
@@ -103,13 +194,16 @@ def build_components(secrets_path=DEFAULT_SECRETS,
 
 
 def main():
-    logging.basicConfig(level=logging.INFO,
-                         format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(level=logging.INFO)
     log = logging.getLogger("trader")
     Path("state").mkdir(parents=True, exist_ok=True)
+
+    # Fix 6 — FileHandler with formatter
     fh = logging.FileHandler(DEFAULT_LOG, encoding="utf-8")
     fh.setLevel(logging.INFO)
+    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     log.addHandler(fh)
+
     comps = build_components(log=log)
     comps.app.mainloop()
 
