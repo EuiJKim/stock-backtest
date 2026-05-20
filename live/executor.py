@@ -6,7 +6,8 @@ from live.safety import (within_position_limit, daily_loss_kill,
 from live.state import Holding
 
 
-def execute(decision, broker, state, safety_params, log, now=None) -> bool:
+def execute(decision, broker, state, safety_params, log, now=None,
+            stop_event=None) -> bool:
     """
     Decision을 실제 주문으로 실행한다.
     안전검사 실패·주문거부·예외 시 state.halted=True로 설정하고 False 반환.
@@ -43,24 +44,38 @@ def execute(decision, broker, state, safety_params, log, now=None) -> bool:
             continue
         try:
             oid = broker.place_order(order.code, "SELL", order.qty)
-            status = broker.get_order_status(oid)
         except Exception as e:
             log.error(f"SELL {order.code} 실패: {e}")
+            state.halted = True
+            return False
+        try:
+            status = broker.get_order_status(oid)
+        except Exception as e:
+            log.error(f"SELL {order.code} placed (oid={oid}) but status check failed: "
+                      f"{e} — order may have filled; check broker manually")
             state.halted = True
             return False
         if str(status.get("status", "")).upper() != "FILLED":
             log.error(f"SELL {order.code} 미체결: {status}")
             state.halted = True
             return False
-        state.cash += status["filled_qty"] * status["fill_price"]
         state.holdings.pop(order.code, None)
         log.info(f"SELL {order.code} x{status['filled_qty']} @ "
                  f"{status['fill_price']} ({order.reason})")
+
+    # Stop event check between SELL and BUY phases
+    if stop_event is not None and stop_event.is_set():
+        log.warning("stop requested mid-tick; skipping BUY phase")
+        return False  # halted state is set by on_stop
 
     # 4) 매수
     for order in decision.orders:
         if order.side != "BUY":
             continue
+        # Per-iteration stop check
+        if stop_event is not None and stop_event.is_set():
+            log.warning("stop requested mid-tick; skipping BUY phase")
+            return False  # halted state is set by on_stop
         try:
             quote = broker.get_quote(order.code)
         except Exception as e:
@@ -80,16 +95,21 @@ def execute(decision, broker, state, safety_params, log, now=None) -> bool:
             continue
         try:
             oid = broker.place_order(order.code, "BUY", order.qty)
-            status = broker.get_order_status(oid)
         except Exception as e:
             log.error(f"BUY {order.code} 실패: {e}")
+            state.halted = True
+            return False
+        try:
+            status = broker.get_order_status(oid)
+        except Exception as e:
+            log.error(f"BUY {order.code} placed (oid={oid}) but status check failed: "
+                      f"{e} — order may have filled; check broker manually")
             state.halted = True
             return False
         if str(status.get("status", "")).upper() != "FILLED":
             log.error(f"BUY {order.code} 미체결: {status}")
             state.halted = True
             return False
-        state.cash -= status["filled_qty"] * status["fill_price"]
         state.holdings[order.code] = Holding(
             shares=int(status["filled_qty"]),
             entry_price=float(status["fill_price"]),

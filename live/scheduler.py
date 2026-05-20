@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, time as dtime
 import threading
 
@@ -15,12 +16,13 @@ def should_trigger(now: datetime, target_time: dtime,
 
 class Scheduler:
     def __init__(self, target_time, on_trigger, tick_seconds=30,
-                 clock=datetime.now):
+                 clock=datetime.now, logger=None, stop_event=None):
         self.target_time = target_time
         self.on_trigger = on_trigger
         self.tick_seconds = tick_seconds
         self.clock = clock
-        self._stop = threading.Event()
+        self._logger = logger or logging.getLogger(__name__)
+        self._stop = stop_event if stop_event is not None else threading.Event()
         self._thread = None
 
     def start(self, state_provider) -> None:
@@ -35,7 +37,7 @@ class Scheduler:
                     try:
                         self.on_trigger()
                     except Exception:
-                        pass  # GUI 로그어가 상위에서 잡음
+                        self._logger.exception("scheduler trigger crashed")
                 self._stop.wait(self.tick_seconds)
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()

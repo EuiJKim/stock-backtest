@@ -1,4 +1,5 @@
 import logging
+import threading
 from live.executor import execute
 from live.runner import Decision, Order
 from live.state import Holding, TraderState, TraderParams
@@ -116,3 +117,59 @@ def test_live_mode_rejected():
     ok = execute(d, broker, state, _safety(), _logger())
     assert ok is False
     assert state.halted is True
+
+
+def test_execute_skips_BUY_when_stop_event_set_between_sell_and_buy():
+    """SELL executes; stop_event is set; BUY should be skipped."""
+    broker = FakeBroker(quote=10_000.0)
+    state = TraderState(mode="paper", cash=0.0,
+                        holdings={"OLD": Holding(shares=5,
+                                                 entry_price=20_000.0)},
+                        equity_start_of_day=10_000_000.0)
+    stop_event = threading.Event()
+    stop_event.set()  # already set — BUY phase should be skipped
+    d = Decision(action="REBALANCE", orders=[
+        Order(code="OLD", side="SELL", qty=5, reason="rebalance"),
+        Order(code="NEW", side="BUY", qty=100, reason="rebalance"),
+    ])
+    ok = execute(d, broker, state, _safety(), _logger(), stop_event=stop_event)
+    assert ok is False
+    # SELL was placed
+    assert any(p[2] == "SELL" for p in broker.placed)
+    # BUY was NOT placed
+    assert not any(p[2] == "BUY" for p in broker.placed)
+
+
+class FlakyStatusBroker:
+    """place_order succeeds; get_order_status always raises."""
+    def __init__(self):
+        self.placed = []
+
+    def get_quote(self, code): return 10_000.0
+    def get_balance(self): return {"cash": 5_000_000.0, "equity": 10_000_000.0}
+    def get_holdings(self): return {}
+
+    def place_order(self, code, side, qty):
+        oid = f"ORD-{len(self.placed)+1}"
+        self.placed.append((oid, code, side, qty))
+        return oid
+
+    def get_order_status(self, oid):
+        raise Exception("status fetch transient failure")
+
+
+def test_status_check_failure_logged_distinctly(caplog):
+    broker = FlakyStatusBroker()
+    state = TraderState(mode="paper", cash=10_000_000.0,
+                        equity_start_of_day=10_000_000.0)
+    d = Decision(action="REBALANCE", orders=[
+        Order(code="X", side="BUY", qty=100, reason="rebalance"),
+    ])
+    with caplog.at_level(logging.ERROR):
+        ok = execute(d, broker, state, _safety(), logging.getLogger("test_st"))
+    assert ok is False and state.halted is True
+    # Order WAS placed
+    assert broker.placed[0][2] == "BUY"
+    # Log message distinguishes the case
+    assert any(("status check failed" in r.getMessage()
+                or "manual" in r.getMessage()) for r in caplog.records)

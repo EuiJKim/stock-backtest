@@ -1,3 +1,4 @@
+import threading
 import tkinter as tk
 import pytest
 
@@ -14,13 +15,14 @@ def app_factory(tk_root):
     created = []
 
     def make(state=None, params=None, universe=None,
-             on_start=lambda: None, on_stop=lambda: None):
+             on_start=lambda: None, on_stop=lambda: None, **kwargs):
         a = TestApp(
             state=state or TraderState(mode="paper"),
             params=params or TraderParams(),
             universe=universe or UniverseStore(entries=[]),
             on_start=on_start, on_stop=on_stop,
             master=tk_root,
+            **kwargs,
         )
         created.append(a)
         return a
@@ -52,4 +54,32 @@ def test_app_start_stop_invoke_callbacks(app_factory):
 def test_app_logs_messages(app_factory):
     app = app_factory()
     app.log("hello world")
+    app.flush_gui_queue()  # drain the thread-safe queue
     assert "hello world" in app.log_text()
+
+
+def test_app_log_is_thread_safe(app_factory):
+    app = app_factory()
+    t = threading.Thread(target=lambda: app.log("from-thread"))
+    t.start()
+    t.join(timeout=1.0)
+    app.flush_gui_queue()  # drain the thread-safe queue
+    assert "from-thread" in app.log_text()
+
+
+def test_app_save_button_writes_files(app_factory, tmp_path):
+    from live.universe_store import UniverseStore, UniverseEntry
+    from live.state import TraderParams
+    params_path = tmp_path / "params.json"
+    universe_path = tmp_path / "universe.json"
+    params = TraderParams(top_k=4)
+    universe = UniverseStore(entries=[UniverseEntry("A", "111")])
+    app = app_factory(params=params, universe=universe,
+                      params_path=params_path, universe_path=universe_path)
+    # Modify a param in the panel, then save
+    app.params_panel.set_top_k(7)
+    app.click_save()
+    app.flush_gui_queue()  # drain the thread-safe queue for the log call
+    assert params_path.exists() and universe_path.exists()
+    written = TraderParams.load(params_path)
+    assert written.top_k == 7

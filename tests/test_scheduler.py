@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, time
 import threading
 
@@ -54,3 +55,20 @@ def test_scheduler_respects_halted():
     threading.Event().wait(0.2)
     s.stop()
     assert calls == []
+
+
+def test_scheduler_logs_on_trigger_exception(caplog):
+    def _boom():
+        raise RuntimeError("kaboom")
+    logger = logging.getLogger("test_scheduler_boom")
+    s = Scheduler(target_time=time(0, 0),
+                  on_trigger=_boom, tick_seconds=0.05,
+                  clock=lambda: datetime(2026, 5, 20, 10, 0),
+                  logger=logger)
+    state = type("S", (), {"halted": False, "last_action_date": ""})()
+    with caplog.at_level(logging.ERROR, logger="test_scheduler_boom"):
+        s.start(state_provider=lambda: state)
+        threading.Event().wait(0.2)
+        s.stop()
+    assert any("kaboom" in r.getMessage() or "crashed" in r.getMessage()
+                for r in caplog.records)

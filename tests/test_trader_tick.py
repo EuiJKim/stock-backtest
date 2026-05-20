@@ -1,6 +1,7 @@
 """Tests for run_trader_tick (Fix 8: extracted tick function)."""
 import logging
 import tempfile
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -154,3 +155,26 @@ def test_noop_path_returns_noop(tmp_path):
 
     assert result == "NOOP"
     assert state.halted is False
+
+
+def test_tick_skips_when_stop_event_set(tmp_path):
+    """If stop_event is already set the tick returns 'stopped' immediately
+    without placing any orders."""
+    broker = FakeBroker()
+    state = TraderState(equity_start_of_day=10_000_000.0)
+    params = TraderParams()
+    stop_event = threading.Event()
+    stop_event.set()
+
+    result = run_trader_tick(
+        broker=broker, state=state, params=params,
+        universe_codes=["360750"],
+        log=_log(),
+        state_path=tmp_path / "state.json",
+        stop_event=stop_event,
+        now=_weekday_market_hours(),
+        panels_loader=_fake_panels_loader,
+    )
+
+    assert result == "stopped"
+    assert broker.placed == []

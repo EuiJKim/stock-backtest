@@ -1,4 +1,5 @@
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import datetime, time as dtime
 from pathlib import Path
@@ -37,7 +38,7 @@ def _parse_hhmm(s: str) -> dtime:
 
 
 def run_trader_tick(broker, state, params, universe_codes, log,
-                    state_path, now=None, panels_loader=None):
+                    state_path, stop_event=None, now=None, panels_loader=None):
     """One scheduled tick.
 
     1. Skip outside KRX hours (Fix 4).
@@ -51,6 +52,10 @@ def run_trader_tick(broker, state, params, universe_codes, log,
     """
     now = now or datetime.now()
     today_str = now.date().isoformat()
+
+    # Stop event guard — abort immediately if halted externally
+    if stop_event is not None and stop_event.is_set():
+        return "stopped"
 
     # Fix 4 — market hours guard
     if not is_market_open(now):
@@ -66,7 +71,8 @@ def run_trader_tick(broker, state, params, universe_codes, log,
         except Exception as e:
             log.error(f"equity snapshot failed: {e}")
             state.halted = True
-            state.save(state_path)
+            if stop_event is None or not stop_event.is_set():
+                state.save(state_path)
             return "drift_halt"
 
     # Fix 3 — drift guard
@@ -75,7 +81,8 @@ def run_trader_tick(broker, state, params, universe_codes, log,
     except Exception as e:
         log.error(f"holdings fetch failed: {e}")
         state.halted = True
-        state.save(state_path)
+        if stop_event is None or not stop_event.is_set():
+            state.save(state_path)
         return "drift_halt"
 
     if not holdings_drift_ok(state.holdings, broker_holdings,
@@ -85,7 +92,8 @@ def run_trader_tick(broker, state, params, universe_codes, log,
             f"state={state.holdings}, broker={broker_holdings}"
         )
         state.halted = True
-        state.save(state_path)
+        if stop_event is None or not stop_event.is_set():
+            state.save(state_path)
         return "drift_halt"
 
     # Build price panels
@@ -104,7 +112,8 @@ def run_trader_tick(broker, state, params, universe_codes, log,
     except Exception as e:
         log.exception(f"panels load failed: {e}")
         state.halted = True
-        state.save(state_path)
+        if stop_event is None or not stop_event.is_set():
+            state.save(state_path)
         return "drift_halt"
 
     safety_params = {
@@ -118,15 +127,18 @@ def run_trader_tick(broker, state, params, universe_codes, log,
         decision = decide(close, now.date(),
                           state.holdings, balance.get("cash", 0.0),
                           params, state)
-        ok = execute(decision, broker, state, safety_params, log, now=now)
-        state.save(state_path)
+        ok = execute(decision, broker, state, safety_params, log, now=now,
+                     stop_event=stop_event)
+        if stop_event is None or not stop_event.is_set():
+            state.save(state_path)
         log.info(f"trigger 완료 ok={ok} action={decision.action} "
                  f"reason={decision.reason}")
         return decision.action
     except Exception as e:
         log.exception(f"trigger 실패: {e}")
         state.halted = True
-        state.save(state_path)
+        if stop_event is None or not stop_event.is_set():
+            state.save(state_path)
         return "error"
 
 
@@ -147,6 +159,8 @@ def build_components(secrets_path=DEFAULT_SECRETS,
                           app_secret=creds.app_secret,
                           account_no=creds.account_no)
 
+    stop_event = threading.Event()
+
     def on_trigger():
         run_trader_tick(
             broker=broker,
@@ -155,10 +169,12 @@ def build_components(secrets_path=DEFAULT_SECRETS,
             universe_codes=universe.codes(),
             log=log,
             state_path=state_path,
+            stop_event=stop_event,
         )
 
     scheduler = Scheduler(target_time=_parse_hhmm(params.target_time_hhmm),
-                          on_trigger=on_trigger, tick_seconds=30)
+                          on_trigger=on_trigger, tick_seconds=30,
+                          stop_event=stop_event)
 
     def on_start():
         scheduler.start(state_provider=lambda: state)
@@ -166,9 +182,9 @@ def build_components(secrets_path=DEFAULT_SECRETS,
         app.refresh_mode()
 
     def on_stop():
-        scheduler.stop()
-        state.halted = True
-        state.save(state_path)
+        state.halted = True        # mark halted FIRST
+        state.save(state_path)     # persist
+        scheduler.stop()           # then signal scheduler
         log.info("자동매매 정지 (HALTED)")
         app.refresh_mode()
 
@@ -177,10 +193,12 @@ def build_components(secrets_path=DEFAULT_SECRETS,
         _AppClass = _build_app_class(tk.Toplevel)
         app = _AppClass(state=state, params=params, universe=universe,
                         on_start=on_start, on_stop=on_stop,
+                        params_path=params_path, universe_path=universe_path,
                         master=app_master)
     else:
         app = TraderApp(state=state, params=params, universe=universe,
-                        on_start=on_start, on_stop=on_stop)
+                        on_start=on_start, on_stop=on_stop,
+                        params_path=params_path, universe_path=universe_path)
 
     # Fix 5 — wire GUI log panel to stdlib logger
     gui_handler = GuiLogHandler(app)
