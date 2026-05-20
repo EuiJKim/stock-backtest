@@ -5,3 +5,7 @@ venv/
 data/cache/
 report_output*/
 .pytest_cache/
+secrets/*
+!secrets/.gitkeep
+state/*
+!state/.gitkeep
