@@ -10,17 +10,22 @@
   python run_portfolio.py --weights "TIGER 미국나스닥100:0.6,TIGER 미국필라델피아반도체나스닥:0.4"
   python run_portfolio.py --codes "133690:0.7,381180:0.3" --offline   # 리스팅 조회 없이
   python run_portfolio.py --compare-rebalance                          # 규칙별 비교
+  python run_portfolio.py --monthly 500000 --weights "TIGER 미국나스닥100:1"  # 매월 50만원 적립식
 
 오프라인 데이터: data/cache/<코드>.csv (Date 인덱스, Open/Close 열) 가 있으면
 네트워크 없이 그대로 사용한다 (data.loader 캐시 포맷과 동일).
 """
 import argparse
+import os
 from datetime import date
 
 from config import KNOWN_CODES, FixedWeightConfig
 from data.loader import build_panels
 from engine.backtest import benchmark_curve
+from engine.dca_backtest import run_dca, run_lump_sum
 from engine.fixed_weight_backtest import run_fixed_weight
+from metrics.dca import summarize_dca
+from report.dca_report import write_dca_report
 from metrics.performance import summarize
 from report.compare import write_compare_report
 from strategy.fixed_weight import REBALANCE_RULES
@@ -57,6 +62,12 @@ def parse_args(argv=None):
     p.add_argument("--start", default="2016-01-01")
     p.add_argument("--end", default="")
     p.add_argument("--capital", type=float, default=10_000_000.0)
+    p.add_argument("--monthly", type=float, default=0.0,
+                   help="적립식 모드: 매월 첫 거래일 납입액(원). 0이면 거치식 비중 백테스트")
+    p.add_argument("--initial", type=float, default=0.0,
+                   help="적립식 모드 첫 달 추가 납입(초기 투자금)")
+    p.add_argument("--no-cash-rebalance", action="store_true",
+                   help="적립식: 납입금을 목표 비중대로만 매수 (부족 자산 우선 배분 끄기)")
     p.add_argument("--offline", action="store_true",
                    help="fdr 리스팅 조회 생략, config.KNOWN_CODES만 사용")
     p.add_argument("--cache-dir", default="data/cache",
@@ -115,6 +126,27 @@ def build_scenarios(close, opens, code_weights, cfg, name_by_code,
     return curves, summaries, weight_hist
 
 
+def run_dca_mode(args, cfg, close, opens, code_weights, name_by_code):
+    """매월 적립식 + 동일 총액 거치식 비교."""
+    value, invested, trades, contribs = run_dca(
+        close, opens, code_weights, cfg, monthly_amount=args.monthly,
+        rebalance_with_cash=not args.no_cash_rebalance, initial_amount=args.initial)
+    label = f"적립식 매월 {args.monthly / 1e4:,.0f}만원"
+    summaries = {label: summarize_dca(value, invested, contribs)}
+    total = invested.iloc[-1]
+    ls_value, ls_inv, _, ls_contribs = run_lump_sum(close, opens, code_weights, cfg, total)
+    summaries["거치식 (동일 총액)"] = summarize_dca(ls_value, ls_inv, ls_contribs)
+
+    title = f"DCA — {_label(code_weights, name_by_code)}"
+    print(f"\n{title}")
+    print(f"기간: {value.index[0].date()} ~ {value.index[-1].date()}  "
+          f"납입 {len(contribs)}회")
+    print(write_dca_report(value, invested, summaries, args.out, title,
+                           extra_curves={"거치식 평가금액": ls_value}))
+    print(f"\n리포트: {args.out}/summary.html")
+    return summaries
+
+
 def main(argv=None):
     args = parse_args(argv)
     cfg = FixedWeightConfig(rebalance=args.rebalance, band=args.band,
@@ -135,6 +167,9 @@ def main(argv=None):
     bench_code = KNOWN_CODES.get(cfg.benchmark_name)
     if bench_code is None and not args.offline:
         bench_code = resolve_codes([cfg.benchmark_name], False)[cfg.benchmark_name]
+    if bench_code and args.offline and not os.path.exists(
+            os.path.join(cfg.cache_dir, f"{bench_code}.csv")):
+        bench_code = None  # 오프라인에서 캐시 없는 벤치마크는 조회하지 않음
     if bench_code:
         name_by_code.setdefault(bench_code, cfg.benchmark_name)
 
@@ -144,6 +179,9 @@ def main(argv=None):
     missing = [c for c in code_weights if c not in close.columns]
     if missing:
         raise SystemExit(f"시세 없음: {missing}. 네트워크 또는 {cfg.cache_dir}/<코드>.csv 확인")
+
+    if args.monthly > 0:
+        return run_dca_mode(args, cfg, close, opens, code_weights, name_by_code)
 
     rules = list(REBALANCE_RULES) if args.compare_rebalance else [args.rebalance]
     if not args.compare_rebalance and args.rebalance != "none":

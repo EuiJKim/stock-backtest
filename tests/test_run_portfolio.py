@@ -43,3 +43,22 @@ def test_build_scenarios_and_tables(tmp_path):
     assert "70/30 monthly" in table and "CAGR" in table
     yearly = format_yearly_compare(curves)
     assert "2021" in yearly and "2022" in yearly
+
+
+def test_cli_dca_mode_offline(tmp_path):
+    idx = pd.date_range("2021-01-01", periods=300, freq="B")
+    n = len(idx)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    for code, r in [("133690", 0.002), ("360750", 0.001)]:
+        px = 100.0 * (1 + r) ** np.arange(n)
+        df = pd.DataFrame({"Open": px, "Close": px}, index=idx)
+        df.index.name = "Date"
+        df.to_csv(cache / f"{code}.csv")
+    out = run_portfolio.main(["--offline", "--monthly", "100000",
+                              "--codes", "133690:1",
+                              "--cache-dir", str(cache),
+                              "--out", str(tmp_path / "out")])
+    assert any(k.startswith("적립식") for k in out)
+    assert "거치식 (동일 총액)" in out
+    assert (tmp_path / "out" / "summary.html").exists()

@@ -34,4 +34,15 @@ python run_portfolio.py --codes "133690:0.7,381180:0.3" --offline   # 리스팅 
 - 결과: `report_output_portfolio/summary.html`, `compare.png`, `weights.png`, `equity_curves.csv`.
 - 오프라인: `data/cache/<코드>.csv`(Date 인덱스, Open/Close 열)가 있으면 네트워크 없이 사용.
 
+### 적립식(DCA) 모드
+
+```bash
+python run_portfolio.py --monthly 1000000 --weights "TIGER 미국나스닥100:1"   # 매월 100만원
+python run_portfolio.py --monthly 500000 --initial 10000000                 # 초기 1천만원 + 매월 50만원
+```
+
+- 매월 첫 거래일 종가에 납입 신호, 다음 거래일 시가에 매수. 새 납입금은 목표 비중 대비 부족한 자산에 우선 배분(매도 없음).
+- 지표: 총 납입·최종 평가·납입 대비 수익률·연환산 IRR·최대 낙폭·최저 손익률·손실 상태 월수. 동일 총액 거치식과 비교.
+- 결과: `report_output_portfolio/summary.html`, `dca.png`, `dca_curve.csv`.
+
 설계: `docs/specs/2026-05-19-etf-momentum-backtest-design.md`
