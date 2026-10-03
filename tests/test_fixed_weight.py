@@ -119,3 +119,26 @@ def test_trims_to_common_history():
     assert curve.index[0] == close.index[50]
     with pytest.raises(KeyError):
         run_fixed_weight(close, opens, {"A": 0.5, "Z": 0.5}, _cfg())
+
+
+def test_rebalance_trades_only_the_difference():
+    close, opens = _panels()
+    cfg = _cfg(commission_rate=0.001, slippage_rate=0.0)
+    _, trades, _ = run_fixed_weight(close, opens, {"A": 0.7, "B": 0.3}, cfg,
+                                    rebalance="monthly")
+    rebal = [t for t in trades if t["reason"] == "rebalance"]
+    # A만 상승 → 매달 A 일부 매도, B 일부 매수 (전량 매도 아님)
+    assert rebal and all(t["code"] == "A" for t in rebal if t["side"] == "SELL")
+    assert all(t["code"] == "B" for t in rebal if t["side"] == "BUY")
+    turnover = sum(t["shares"] * t["price"] for t in rebal)
+    assert turnover < 0.2 * 1_000_000.0 * 12
+
+
+def test_cash_never_negative_after_initial_buy():
+    close, opens = _panels()
+    cfg = _cfg(commission_rate=0.001, slippage_rate=0.001)
+    curve, trades, wh = run_fixed_weight(close, opens, {"A": 0.7, "B": 0.3}, cfg,
+                                         rebalance="monthly")
+    # 비용을 포함해도 현금 비중이 음수가 되지 않음
+    cash_w = 1.0 - wh[["A", "B"]].sum(axis=1)
+    assert (cash_w > -1e-9).all()

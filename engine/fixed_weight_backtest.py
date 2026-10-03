@@ -8,8 +8,8 @@
 import numpy as np
 import pandas as pd
 
-from engine.backtest import _buy, _sell
-from engine.portfolio import Portfolio
+from engine.costs import trade_cost
+from engine.portfolio import Portfolio, Position
 from strategy.fixed_weight import (band_breached, current_weights,
                                    normalize_weights, rebalance_flags)
 
@@ -19,15 +19,59 @@ def _all_available(row: pd.Series, codes) -> bool:
                for c in codes)
 
 
-def _rebalance_to_target(pf, target, opens, config, trades, date, reason):
-    """전량 매도 후 목표 비중으로 재매수 (단순·보수적)."""
+def _rebalance_to_target(pf, target, px, config, trades, date, reason):
+    """목표 비중과의 차이만 매매 (초과분 부분 매도 → 부족분 매수).
+
+    전량 매도 후 재매수하면 매번 포트폴리오 전체에 왕복 비용이 붙어
+    리밸런싱 비용이 과대 계상되므로 차액만 거래한다.
+    """
+    rate = config.commission_rate + config.slippage_rate
+    cur = {c: (pf.positions[c].shares * px[c] if c in pf.positions else 0.0)
+           for c in set(pf.positions) | set(target)}
+    equity = pf.cash + sum(cur.values())
+    if equity <= 0:
+        return
+
+    # 1) 초과 보유분 부분 매도
     for code in list(pf.positions):
-        _sell(pf, code, opens.get(code, np.nan), config, trades, date, reason)
-    investable = pf.cash
-    for code, w in target.items():
-        px = opens.get(code, np.nan)
-        if np.isfinite(px) and px > 0:
-            _buy(pf, code, px, investable * w, config, trades, date, reason)
+        excess = cur[code] - equity * target.get(code, 0.0)
+        if excess <= 1e-9 or not np.isfinite(px[code]):
+            continue
+        pos = pf.positions[code]
+        shares = min(excess / px[code], pos.shares)
+        proceeds = shares * px[code]
+        cost = trade_cost(proceeds, config.commission_rate, config.slippage_rate)
+        pf.cash += proceeds - cost
+        pos.shares -= shares
+        if pos.shares <= 1e-12:
+            pf.positions.pop(code)
+        trades.append({"date": date, "code": code, "side": "SELL",
+                       "shares": shares, "price": px[code], "cost": cost,
+                       "reason": reason})
+
+    # 2) 부족분 매수 (비용 포함 가용 현금 한도로 비례 축소)
+    deficit = {c: max(equity * w - cur.get(c, 0.0), 0.0) for c, w in target.items()}
+    total_def = sum(deficit.values())
+    if total_def <= 1e-9 or pf.cash <= 0:
+        return
+    scale = min(1.0, (pf.cash / (1.0 + rate)) / total_def)
+    for code, need in deficit.items():
+        notional = need * scale
+        if notional <= 1e-9 or not np.isfinite(px[code]) or px[code] <= 0:
+            continue
+        shares = notional / px[code]
+        cost = trade_cost(notional, config.commission_rate, config.slippage_rate)
+        pf.cash -= notional + cost
+        if code in pf.positions:
+            pos = pf.positions[code]
+            total = pos.shares + shares
+            pos.entry_price = (pos.entry_price * pos.shares + px[code] * shares) / total
+            pos.shares = total
+        else:
+            pf.positions[code] = Position(shares=shares, entry_price=px[code])
+        trades.append({"date": date, "code": code, "side": "BUY",
+                       "shares": shares, "price": px[code], "cost": cost,
+                       "reason": reason})
 
 
 def run_fixed_weight(close_panel: pd.DataFrame, open_panel: pd.DataFrame,
