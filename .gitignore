@@ -9,3 +9,4 @@ secrets/*
 !secrets/.gitkeep
 state/*
 !state/.gitkeep
+data/plan150*/
