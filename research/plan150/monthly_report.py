@@ -57,17 +57,25 @@ def main():
     ports = dict(PRESETS)
     if a.weights:
         ports = {"지정": parse_w(a.weights), **ports}
+    skipped = {n: sorted(set(w) - set(k.columns)) for n, w in ports.items() if set(w) - set(k.columns)}
+    ports = {n: w for n, w in ports.items() if n not in skipped}
     lines = [f"# 월간 점검 {date.today()}  (데이터 마지막 {end.date()})", ""]
+    def last_real(c):  # 값이 마지막으로 바뀐 날 = 실제 시세 기준일 (ffill 구간 제외)
+        s = k[c].dropna(); s = s[s.diff().fillna(1) != 0]
+        return s.index[-1].date() if len(s) else None
+    lines += ["실제 기준일: " + " / ".join(f"{c} {last_real(c)}" for c in ["나스닥100", "필라델피아반도체", "코스피", "달러현금(환율)"] if c in k.columns), ""]
+    if skipped:
+        lines += ["데이터 없음으로 제외: " + ", ".join(f"{n}({'·'.join(c)})" for n, c in skipped.items()), ""]
 
     def ret(s, x, y):
         s = s.dropna(); x = pd.Timestamp(x); y = pd.Timestamp(y)
         return s.loc[:y].iloc[-1] / s.loc[:x].iloc[-1] - 1 if len(s.loc[:x]) else np.nan
     lines += ["## 자산별 (원화)", "", "| 자산 | 1개월 | 3개월 | YTD | 1년 | 52주 고점 대비 |", "|---|---|---|---|---|---|"]
-    for c in ["나스닥100", "S&P500", "코스피", "필라델피아반도체", "배당다우존스", "금", "미국채7-10년", "달러현금(환율)"]:
+    for c in [c for c in ["나스닥100", "S&P500", "코스피", "필라델피아반도체", "배당다우존스", "금", "미국채7-10년", "달러현금(환율)"] if c in k.columns]:
         s = k[c].dropna(); hi = s.loc[end - pd.DateOffset(years=1):].max()
         lines.append(f"| {c} | {ret(s, end - pd.DateOffset(months=1), end)*100:+.1f}% | {ret(s, end - pd.DateOffset(months=3), end)*100:+.1f}% | "
                      f"{ret(s, str(end.year - 1) + '-12-31', end)*100:+.1f}% | {ret(s, end - pd.DateOffset(years=1), end)*100:+.1f}% | {(s.iloc[-1]/hi-1)*100:+.1f}% |")
-    core = ["나스닥100", "코스피", "필라델피아반도체", "배당다우존스", "금", "달러현금(환율)"]
+    core = [c for c in ["나스닥100", "코스피", "필라델피아반도체", "배당다우존스", "금", "달러현금(환율)"] if c in k.columns]
     corr = k[core].loc[end - pd.DateOffset(years=1):].pct_change().dropna().corr()
     lines += ["", f"나스닥100·코스피 1년 상관계수: {corr.loc['나스닥100','코스피']:.2f} / 나스닥100·반도체: {corr.loc['나스닥100','필라델피아반도체']:.2f} / 나스닥100·금: {corr.loc['나스닥100','금']:.2f}", ""]
     lines += ["## 포트폴리오별", "", "| 포트폴리오 | 최근 1개월 | 최근 3개월 | 4개월 적립 중간/하위10%/최악 | 손실확률 | 2014~ 연수익 | 최대낙폭 |", "|---|---|---|---|---|---|---|"]
